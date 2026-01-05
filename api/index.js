@@ -474,7 +474,7 @@ const ROSTER_CACHE_DURATION_MS = 30 * 60 * 1000; // 30 minutes
 app.get('/api/roster/:team', async (req, res) => {
     try {
         const teamName = normalizeTeamName(decodeURIComponent(req.params.team));
-        const year = req.query.year || 2026;
+        const year = req.query.year || 2025; // 2026 rosters not available yet
         
         if (!TEAM_INFO[teamName]) {
             return res.status(404).json({
