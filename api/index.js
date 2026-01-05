@@ -184,7 +184,7 @@ const TEAM_INFO = {
 
 // Team name aliases (CFBD uses different names sometimes)
 const TEAM_ALIASES = {
-    "Miami (OH)": ["Miami (OH)", "Miami Ohio", "Miami-OH"],
+    "Miami (OH)": ["Miami (OH)", "Miami Ohio", "Miami-OH", "Miami RedHawks"],
     "Ole Miss": ["Ole Miss", "Mississippi"],
     "USC": ["USC", "Southern California"],
     "LSU": ["LSU", "Louisiana State"],
@@ -200,7 +200,12 @@ const TEAM_ALIASES = {
     "FAU": ["FAU", "Florida Atlantic"],
     "NC State": ["NC State", "North Carolina State"],
     "UConn": ["UConn", "Connecticut"],
-    "UMass": ["UMass", "Massachusetts"]
+    "UMass": ["UMass", "Massachusetts"],
+    "Appalachian State": ["Appalachian State", "App State", "Appalachian"],
+    "Hawaii": ["Hawaii", "Hawai'i", "Hawai`i"],
+    "San Jose State": ["San Jose State", "San José State", "SJSU"],
+    "Louisiana Monroe": ["Louisiana Monroe", "UL Monroe", "Louisiana-Monroe", "ULM"],
+    "Louisiana": ["Louisiana", "Louisiana-Lafayette", "UL Lafayette", "ULL"]
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
