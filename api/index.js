@@ -605,14 +605,17 @@ app.get('/api/stats/years', (req, res) => {
     const currentYear = getCurrentSeasonYear();
     const years = [];
     
-    // CFBD has data going back to around 2013 for most stats
-    for (let year = currentYear; year >= 2013; year--) {
+    // Only show last 4 seasons - covers current roster players and transfers
+    // (Freshman through Senior + extra year COVID eligibility)
+    const yearsToShow = 4;
+    for (let year = currentYear; year >= currentYear - yearsToShow + 1; year--) {
         years.push(year);
     }
     
     res.json({
         currentSeason: currentYear,
-        availableYears: years
+        availableYears: years,
+        note: "Stats for current roster players and transfers (last 4 seasons)"
     });
 });
 
