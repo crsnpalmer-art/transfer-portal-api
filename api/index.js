@@ -596,6 +596,27 @@ function getCurrentSeasonYear() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// AVAILABLE YEARS ENDPOINT - /api/stats/years
+// Returns list of years with available stats data
+// NOTE: Must be defined BEFORE /api/stats/:team to avoid route conflict
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.get('/api/stats/years', (req, res) => {
+    const currentYear = getCurrentSeasonYear();
+    const years = [];
+    
+    // CFBD has data going back to around 2013 for most stats
+    for (let year = currentYear; year >= 2013; year--) {
+        years.push(year);
+    }
+    
+    res.json({
+        currentSeason: currentYear,
+        availableYears: years
+    });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // BASIC STATS ENDPOINT - /api/stats/:team
 // Returns: passing, rushing, receiving, defensive, kicking, punting, returns
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -960,26 +981,6 @@ app.get('/api/stats/advanced/:team', async (req, res) => {
             message: error.message
         });
     }
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// AVAILABLE YEARS ENDPOINT - /api/stats/years
-// Returns list of years with available stats data
-// ═══════════════════════════════════════════════════════════════════════════════
-
-app.get('/api/stats/years', (req, res) => {
-    const currentYear = getCurrentSeasonYear();
-    const years = [];
-    
-    // CFBD has data going back to around 2013 for most stats
-    for (let year = currentYear; year >= 2013; year--) {
-        years.push(year);
-    }
-    
-    res.json({
-        currentSeason: currentYear,
-        availableYears: years
-    });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
