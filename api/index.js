@@ -474,7 +474,7 @@ const ROSTER_CACHE_DURATION_MS = 30 * 60 * 1000; // 30 minutes
 app.get('/api/roster/:team', async (req, res) => {
     try {
         const teamName = normalizeTeamName(decodeURIComponent(req.params.team));
-        const year = req.query.year || 2025;
+        const year = req.query.year || 2026;
         
         if (!TEAM_INFO[teamName]) {
             return res.status(404).json({
@@ -497,20 +497,25 @@ app.get('/api/roster/:team', async (req, res) => {
         // Fetch from CFBD
         const roster = await fetchFromCFBD(`/roster?team=${encodeURIComponent(teamName)}&year=${year}`);
         
-        // Transform roster data
+        // Debug: log first player to see field names
+        if (roster.length > 0) {
+            console.log('Sample player from CFBD:', JSON.stringify(roster[0], null, 2));
+        }
+        
+        // Transform roster data (CFBD uses first_name/last_name or firstName/lastName)
         const players = roster.map(player => ({
-            id: player.id,
-            name: `${player.first_name} ${player.last_name}`,
-            firstName: player.first_name,
-            lastName: player.last_name,
+            id: String(player.id),
+            name: `${player.first_name || player.firstName || ''} ${player.last_name || player.lastName || ''}`.trim() || 'Unknown',
+            firstName: player.first_name || player.firstName || '',
+            lastName: player.last_name || player.lastName || '',
             position: player.position || 'Unknown',
             jersey: player.jersey,
             year: player.year || 'Unknown',
             height: player.height,
             weight: player.weight,
-            city: player.home_city,
-            state: player.home_state,
-            country: player.home_country
+            city: player.home_city || player.homeCity || player.city,
+            state: player.home_state || player.homeState || player.state,
+            country: player.home_country || player.homeCountry || player.country
         }));
         
         // Sort by position groups, then by name
