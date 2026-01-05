@@ -12,7 +12,7 @@ app.use(express.json());
 
 const CFBD_API_KEY = process.env.CFBD_API_KEY;
 const CFBD_BASE_URL = 'https://api.collegefootballdata.com';
-const CACHE_DURATION_MS = 5 * 60 * 1000; // 5 minutes cache
+const CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours cache (CFBD updates once daily)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // IN-MEMORY CACHE (year-aware)
@@ -468,7 +468,7 @@ app.get('/api/teams', (req, res) => {
 
 // Roster cache (per team, 30 minute cache)
 const rosterCache = {};
-const ROSTER_CACHE_DURATION_MS = 30 * 60 * 1000; // 30 minutes
+const ROSTER_CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours (CFBD updates once daily)
 
 // Get roster for a specific team
 app.get('/api/roster/:team', async (req, res) => {
@@ -605,3 +605,4 @@ if (require.main === module) {
 
 // Export for Vercel
 module.exports = app;
+
