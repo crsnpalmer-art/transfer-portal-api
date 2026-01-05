@@ -15,10 +15,11 @@ const CFBD_BASE_URL = 'https://api.collegefootballdata.com';
 const CACHE_DURATION_MS = 5 * 60 * 1000; // 5 minutes cache
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// IN-MEMORY CACHE
+// IN-MEMORY CACHE (year-aware)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 let transferCache = {
+    year: null,
     data: null,
     lastUpdated: null,
     byTeam: {}
@@ -271,16 +272,17 @@ async function fetchFromCFBD(endpoint) {
     return response.json();
 }
 
-async function fetchTransferPortalData(year = 2025) {
-    // Check cache first
+async function fetchTransferPortalData(year = 2026) {
+    // Check cache first (must match year)
     const now = Date.now();
     if (transferCache.data && transferCache.lastUpdated && 
+        transferCache.year === year &&
         (now - transferCache.lastUpdated) < CACHE_DURATION_MS) {
-        console.log('📦 Using cached transfer data');
+        console.log(`📦 Using cached transfer data for ${year}`);
         return transferCache.data;
     }
     
-    console.log('🔄 Fetching fresh transfer data from CFBD...');
+    console.log(`🔄 Fetching fresh transfer data from CFBD for ${year}...`);
     
     try {
         const transfers = await fetchFromCFBD(`/player/portal?year=${year}`);
@@ -329,6 +331,7 @@ async function fetchTransferPortalData(year = 2025) {
         
         // Update cache
         transferCache = {
+            year: year,
             data: teamTransfers,
             lastUpdated: now,
             byTeam: teamTransfers
@@ -382,7 +385,7 @@ app.get('/api/health', (req, res) => {
 // Get all transfers (main endpoint for iOS app)
 app.get('/api/transfers', async (req, res) => {
     try {
-        const year = req.query.year || 2025;
+        const year = req.query.year || 2026;
         const teamData = await fetchTransferPortalData(year);
         
         // Calculate totals
@@ -417,7 +420,7 @@ app.get('/api/transfers', async (req, res) => {
 app.get('/api/transfers/:team', async (req, res) => {
     try {
         const teamName = normalizeTeamName(decodeURIComponent(req.params.team));
-        const year = req.query.year || 2025;
+        const year = req.query.year || 2026;
         
         if (!TEAM_INFO[teamName]) {
             return res.status(404).json({
@@ -551,7 +554,7 @@ app.get('/api/roster/:team', async (req, res) => {
 app.post('/api/refresh', async (req, res) => {
     try {
         transferCache = { data: null, lastUpdated: null, byTeam: {} };
-        const data = await fetchTransferPortalData(2025);
+        const data = await fetchTransferPortalData(2026);
         
         res.json({
             success: true,
