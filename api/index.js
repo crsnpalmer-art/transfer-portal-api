@@ -459,6 +459,94 @@ app.get('/api/teams', (req, res) => {
     });
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ROSTER ENDPOINT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Roster cache (per team, 30 minute cache)
+const rosterCache = {};
+const ROSTER_CACHE_DURATION_MS = 30 * 60 * 1000; // 30 minutes
+
+// Get roster for a specific team
+app.get('/api/roster/:team', async (req, res) => {
+    try {
+        const teamName = normalizeTeamName(decodeURIComponent(req.params.team));
+        const year = req.query.year || 2025;
+        
+        if (!TEAM_INFO[teamName]) {
+            return res.status(404).json({
+                error: 'Team not found',
+                team: req.params.team,
+                suggestion: 'Check /api/teams for valid team names'
+            });
+        }
+        
+        // Check cache
+        const cacheKey = `${teamName}-${year}`;
+        const now = Date.now();
+        if (rosterCache[cacheKey] && (now - rosterCache[cacheKey].lastUpdated) < ROSTER_CACHE_DURATION_MS) {
+            console.log(`📦 Using cached roster for ${teamName}`);
+            return res.json(rosterCache[cacheKey].data);
+        }
+        
+        console.log(`🔄 Fetching fresh roster for ${teamName}...`);
+        
+        // Fetch from CFBD
+        const roster = await fetchFromCFBD(`/roster?team=${encodeURIComponent(teamName)}&year=${year}`);
+        
+        // Transform roster data
+        const players = roster.map(player => ({
+            id: player.id,
+            name: `${player.first_name} ${player.last_name}`,
+            firstName: player.first_name,
+            lastName: player.last_name,
+            position: player.position || 'Unknown',
+            jersey: player.jersey,
+            year: player.year || 'Unknown',
+            height: player.height,
+            weight: player.weight,
+            city: player.home_city,
+            state: player.home_state,
+            country: player.home_country
+        }));
+        
+        // Sort by position groups, then by name
+        const positionOrder = ['QB', 'RB', 'WR', 'TE', 'OL', 'OT', 'OG', 'C', 'DL', 'DE', 'DT', 'NT', 'LB', 'ILB', 'OLB', 'CB', 'S', 'DB', 'K', 'P', 'LS', 'ATH'];
+        players.sort((a, b) => {
+            const posA = positionOrder.indexOf(a.position);
+            const posB = positionOrder.indexOf(b.position);
+            if (posA !== posB) {
+                return (posA === -1 ? 999 : posA) - (posB === -1 ? 999 : posB);
+            }
+            return a.name.localeCompare(b.name);
+        });
+        
+        const responseData = {
+            team: teamName,
+            info: TEAM_INFO[teamName],
+            year: year,
+            playerCount: players.length,
+            players: players,
+            lastUpdated: new Date().toISOString()
+        };
+        
+        // Cache the result
+        rosterCache[cacheKey] = {
+            data: responseData,
+            lastUpdated: now
+        };
+        
+        res.json(responseData);
+        
+    } catch (error) {
+        console.error('Error in /api/roster/:team:', error);
+        res.status(500).json({
+            error: 'Failed to fetch roster data',
+            message: error.message
+        });
+    }
+});
+
 // Force cache refresh
 app.post('/api/refresh', async (req, res) => {
     try {
