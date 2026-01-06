@@ -401,6 +401,7 @@ async function fetchTransferPortalData(year = 2026) {
         // Process and organize by team
         const teamTransfers = {};
         
+        // First pass: organize players by team
         for (const transfer of transfers) {
             const fromTeam = normalizeTeamName(transfer.origin);
             const toTeam = normalizeTeamName(transfer.destination);
@@ -415,7 +416,9 @@ async function fetchTransferPortalData(year = 2026) {
                 transferDate: transfer.transferDate,
                 status: toTeam ? 'Committed' : 'Entered',
                 // Include origin so iOS can search for career stats
-                origin: fromTeam
+                origin: fromTeam,
+                // Career history will be populated below
+                careerHistory: []
             };
             
             // Add to "from" team's playersOut
@@ -443,6 +446,59 @@ async function fetchTransferPortalData(year = 2026) {
             }
         }
         
+        // Second pass: fetch career history for each unique player
+        // This is done in batches to avoid overwhelming the API
+        console.log(`🔍 Fetching career history for players...`);
+        const processedPlayers = new Set();
+        
+        for (const teamName of Object.keys(teamTransfers)) {
+            const team = teamTransfers[teamName];
+            
+            // Process playersOut
+            for (const player of team.playersOut) {
+                const playerKey = player.name.toLowerCase();
+                if (processedPlayers.has(playerKey)) {
+                    // Copy career history from already processed player
+                    const existingPlayer = findPlayerInCache(teamTransfers, player.name);
+                    if (existingPlayer) {
+                        player.careerHistory = existingPlayer.careerHistory;
+                    }
+                    continue;
+                }
+                processedPlayers.add(playerKey);
+                
+                // Fetch career history using the origin team
+                const knownTeam = player.origin || teamName;
+                player.careerHistory = await fetchCareerHistoryForPlayer(player.name, knownTeam);
+                
+                // Small delay to avoid rate limiting
+                await new Promise(resolve => setTimeout(resolve, 30));
+            }
+            
+            // Process playersIn
+            for (const player of team.playersIn) {
+                const playerKey = player.name.toLowerCase();
+                if (processedPlayers.has(playerKey)) {
+                    // Copy career history from already processed player
+                    const existingPlayer = findPlayerInCache(teamTransfers, player.name);
+                    if (existingPlayer) {
+                        player.careerHistory = existingPlayer.careerHistory;
+                    }
+                    continue;
+                }
+                processedPlayers.add(playerKey);
+                
+                // Fetch career history using the from team
+                const knownTeam = player.from || teamName;
+                player.careerHistory = await fetchCareerHistoryForPlayer(player.name, knownTeam);
+                
+                // Small delay to avoid rate limiting
+                await new Promise(resolve => setTimeout(resolve, 30));
+            }
+        }
+        
+        console.log(`✅ Processed ${transfers.length} transfers with career history for ${Object.keys(teamTransfers).length} teams`);
+        
         // Update cache
         transferCache = {
             year: year,
@@ -450,8 +506,6 @@ async function fetchTransferPortalData(year = 2026) {
             lastUpdated: now,
             byTeam: teamTransfers
         };
-        
-        console.log(`✅ Processed ${transfers.length} transfers for ${Object.keys(teamTransfers).length} teams`);
         
         return teamTransfers;
         
@@ -461,33 +515,55 @@ async function fetchTransferPortalData(year = 2026) {
     }
 }
 
-// Fetch career history for a single player using stats API
-async function fetchPlayerCareerHistory(playerName, knownTeam) {
+// Helper to find a player in the cache
+function findPlayerInCache(teamTransfers, playerName) {
+    const nameLower = playerName.toLowerCase();
+    for (const team of Object.values(teamTransfers)) {
+        for (const player of [...team.playersOut, ...team.playersIn]) {
+            if (player.name.toLowerCase() === nameLower && player.careerHistory && player.careerHistory.length > 0) {
+                return player;
+            }
+        }
+    }
+    return null;
+}
+
+// Fetch career history for a single player using deep search
+async function fetchCareerHistoryForPlayer(playerName, knownTeam) {
     const history = [];
     const yearsToCheck = [2025, 2024, 2023, 2022, 2021];
+    const teamsChecked = new Set();
     
-    // Start with the known team
-    const teamsToSearch = [knownTeam];
-    const teamsSearched = new Set();
+    // Search known team first, then all other FBS teams
+    const teamsToSearch = [knownTeam, ...Object.keys(TEAM_INFO).filter(t => t !== knownTeam)];
     
     for (const team of teamsToSearch) {
-        if (teamsSearched.has(team)) continue;
-        teamsSearched.add(team);
+        if (teamsChecked.has(team)) continue;
+        teamsChecked.add(team);
         
         for (const year of yearsToCheck) {
+            // Skip if we already found this player at another team for this year
+            const existingForYear = history.find(h => h.year === year);
+            if (existingForYear) continue;
+            
             try {
                 const stats = await fetchFromCFBD(`/stats/player/season?team=${encodeURIComponent(team)}&year=${year}`);
                 const playerStats = stats.find(p => fuzzyNameMatch(p.player, playerName));
                 
                 if (playerStats) {
-                    const existing = history.find(h => h.team === team && h.year === year);
-                    if (!existing) {
-                        history.push({ team, year });
-                    }
+                    history.push({ team, year });
                 }
             } catch (error) {
                 // Silent fail for individual lookups
             }
+        }
+        
+        // Early exit if we found enough history (5 seasons max)
+        if (history.length >= 5) break;
+        
+        // Rate limiting - small delay between teams (only for deep search)
+        if (teamsChecked.size > 1) {
+            await new Promise(resolve => setTimeout(resolve, 10));
         }
     }
     
