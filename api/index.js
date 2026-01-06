@@ -383,7 +383,7 @@ async function fetchCareerHistory(playerName, knownTeams = []) {
     return history;
 }
 
-async function fetchTransferPortalData(year = 2026, includeCareerHistory = false) {
+async function fetchTransferPortalData(year = 2026) {
     // Check cache first (must match year)
     const now = Date.now();
     if (transferCache.data && transferCache.lastUpdated && 
@@ -401,22 +401,21 @@ async function fetchTransferPortalData(year = 2026, includeCareerHistory = false
         // Process and organize by team
         const teamTransfers = {};
         
-        // First pass: organize players by team
         for (const transfer of transfers) {
             const fromTeam = normalizeTeamName(transfer.origin);
             const toTeam = normalizeTeamName(transfer.destination);
+            const playerName = `${transfer.firstName} ${transfer.lastName}`;
             
             const playerData = {
-                name: `${transfer.firstName} ${transfer.lastName}`,
+                name: playerName,
                 position: transfer.position || 'Unknown',
                 rating: convertRatingToScale(transfer.rating),
                 stars: transfer.stars,
                 year: getEligibilityYear(transfer.eligibility),
                 transferDate: transfer.transferDate,
                 status: toTeam ? 'Committed' : 'Entered',
-                // Store origin for career lookup
-                _origin: fromTeam,
-                _destination: toTeam
+                // Include origin so iOS can search for career stats
+                origin: fromTeam
             };
             
             // Add to "from" team's playersOut
@@ -536,94 +535,103 @@ app.get('/api/health', (req, res) => {
 
 // Get career history for a player
 // Usage: /api/career/Cam%20Calhoun?team=Alabama
+// Add &deep=true to search all FBS teams (slower but finds cross-conference transfers)
 app.get('/api/career/:playerName', async (req, res) => {
     try {
         const playerName = decodeURIComponent(req.params.playerName);
         const knownTeam = req.query.team ? normalizeTeamName(decodeURIComponent(req.query.team)) : null;
+        const deepSearch = req.query.deep === 'true';
         
         if (!knownTeam) {
             return res.status(400).json({
                 error: 'Team parameter required',
-                usage: '/api/career/PlayerName?team=TeamName'
+                usage: '/api/career/PlayerName?team=TeamName&deep=true'
             });
         }
         
-        console.log(`🔍 Looking up career history for ${playerName} (known team: ${knownTeam})`);
+        console.log(`🔍 Looking up career history for ${playerName} (known team: ${knownTeam}, deep: ${deepSearch})`);
+        
+        // Check cache first
+        const cacheKey = `career_${playerName.toLowerCase().replace(/\s+/g, '_')}_${knownTeam}`;
+        const now = Date.now();
+        if (playerStatsCache[cacheKey] && (now - playerStatsCache[cacheKey].timestamp) < PLAYER_STATS_CACHE_DURATION) {
+            console.log(`📦 Using cached career data for ${playerName}`);
+            return res.json(playerStatsCache[cacheKey].data);
+        }
         
         // Search for player stats across multiple years
         const history = [];
         const yearsToCheck = [2025, 2024, 2023, 2022, 2021];
-        const teamsToSearch = new Set([knownTeam]);
         const teamsChecked = new Set();
         
-        // First, check the known team
-        for (const year of yearsToCheck) {
-            try {
-                const stats = await fetchFromCFBD(`/stats/player/season?team=${encodeURIComponent(knownTeam)}&year=${year}`);
-                const playerStats = stats.find(p => fuzzyNameMatch(p.player, playerName));
-                
-                if (playerStats) {
-                    history.push({ 
-                        team: knownTeam, 
-                        year: year,
-                        hasStats: true
-                    });
-                }
-            } catch (error) {
-                console.log(`⚠️ Could not fetch stats for ${knownTeam} ${year}`);
+        // Determine which teams to search
+        let teamsToSearch = [knownTeam];
+        
+        if (deepSearch) {
+            // Search ALL FBS teams (132 teams)
+            teamsToSearch = [knownTeam, ...Object.keys(TEAM_INFO).filter(t => t !== knownTeam)];
+        } else {
+            // Just search known team + same conference
+            const knownTeamInfo = TEAM_INFO[knownTeam];
+            if (knownTeamInfo) {
+                const conferenceTeams = Object.entries(TEAM_INFO)
+                    .filter(([name, info]) => info.conference === knownTeamInfo.conference && name !== knownTeam)
+                    .map(([name]) => name);
+                teamsToSearch = [knownTeam, ...conferenceTeams];
             }
         }
         
-        teamsChecked.add(knownTeam);
-        
-        // If player has history, check for previous teams by looking at rosters
-        // This finds teams where the player had stats but wasn't at the known team
-        if (history.length > 0) {
-            // Check a few likely previous teams based on conference
-            const knownTeamInfo = TEAM_INFO[knownTeam];
-            if (knownTeamInfo) {
-                // Get other teams in same conference to check
-                const conferenceTeams = Object.entries(TEAM_INFO)
-                    .filter(([name, info]) => info.conference === knownTeamInfo.conference && name !== knownTeam)
-                    .map(([name]) => name)
-                    .slice(0, 5); // Limit to 5 teams to avoid too many API calls
+        // Search teams for player stats
+        for (const team of teamsToSearch) {
+            if (teamsChecked.has(team)) continue;
+            teamsChecked.add(team);
+            
+            for (const year of yearsToCheck) {
+                // Skip if we already found this player at another team for this year
+                const existingForYear = history.find(h => h.year === year);
+                if (existingForYear) continue;
                 
-                for (const otherTeam of conferenceTeams) {
-                    if (teamsChecked.has(otherTeam)) continue;
-                    teamsChecked.add(otherTeam);
+                try {
+                    const stats = await fetchFromCFBD(`/stats/player/season?team=${encodeURIComponent(team)}&year=${year}`);
+                    const playerStats = stats.find(p => fuzzyNameMatch(p.player, playerName));
                     
-                    for (const year of yearsToCheck) {
-                        // Skip years where we already found the player at known team
-                        if (history.some(h => h.year === year)) continue;
-                        
-                        try {
-                            const stats = await fetchFromCFBD(`/stats/player/season?team=${encodeURIComponent(otherTeam)}&year=${year}`);
-                            const playerStats = stats.find(p => fuzzyNameMatch(p.player, playerName));
-                            
-                            if (playerStats) {
-                                history.push({ 
-                                    team: otherTeam, 
-                                    year: year,
-                                    hasStats: true
-                                });
-                            }
-                        } catch (error) {
-                            // Silent fail
-                        }
+                    if (playerStats) {
+                        history.push({ 
+                            team, 
+                            year,
+                            hasStats: true
+                        });
+                        console.log(`✅ Found ${playerName} at ${team} in ${year}`);
                     }
+                } catch (error) {
+                    // Silent fail for individual lookups
                 }
+            }
+            
+            // Early exit if we found enough history (5 seasons max)
+            if (history.length >= 5) break;
+            
+            // Rate limiting - small delay between teams
+            if (deepSearch) {
+                await new Promise(resolve => setTimeout(resolve, 20));
             }
         }
         
         // Sort by year descending
         history.sort((a, b) => b.year - a.year);
         
-        res.json({
+        const responseData = {
             player: playerName,
             knownTeam: knownTeam,
             careerHistory: history,
-            teamsSearched: Array.from(teamsChecked)
-        });
+            teamsSearched: Array.from(teamsChecked),
+            searchType: deepSearch ? 'deep' : 'conference'
+        };
+        
+        // Cache the result
+        playerStatsCache[cacheKey] = { data: responseData, timestamp: now };
+        
+        res.json(responseData);
         
     } catch (error) {
         console.error('Error in /api/career/:playerName:', error);
