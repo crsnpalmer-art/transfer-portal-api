@@ -12,7 +12,7 @@ app.use(express.json());
 
 const CFBD_API_KEY = process.env.CFBD_API_KEY;
 const CFBD_BASE_URL = 'https://api.collegefootballdata.com';
-const CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours cache (CFBD updates once daily)
+const CACHE_DURATION_MS = 5 * 60 * 1000; // 5 minutes cache
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // IN-MEMORY CACHE (year-aware)
@@ -272,7 +272,118 @@ async function fetchFromCFBD(endpoint) {
     return response.json();
 }
 
-async function fetchTransferPortalData(year = 2026) {
+// ═══════════════════════════════════════════════════════════════════════════════
+// CAREER HISTORY LOOKUP
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Cache for player stats lookups (to avoid repeated API calls)
+const playerStatsCache = {};
+const PLAYER_STATS_CACHE_DURATION = 60 * 60 * 1000; // 1 hour
+
+// Fuzzy name matching for player lookups
+function fuzzyNameMatch(name1, name2) {
+    const n1 = name1.toLowerCase().trim();
+    const n2 = name2.toLowerCase().trim();
+    
+    if (n1 === n2) return true;
+    
+    const parts1 = n1.split(' ');
+    const parts2 = n2.split(' ');
+    
+    // Must have same last name
+    const last1 = parts1[parts1.length - 1];
+    const last2 = parts2[parts2.length - 1];
+    if (last1 !== last2) return false;
+    
+    // Check first names
+    const first1 = parts1[0];
+    const first2 = parts2[0];
+    
+    if (first1 === first2) return true;
+    if (first1.startsWith(first2) || first2.startsWith(first1)) return true;
+    
+    // Common nicknames
+    const nicknames = {
+        'cam': ['cameron'], 'cameron': ['cam'],
+        'mike': ['michael'], 'michael': ['mike'],
+        'chris': ['christopher'], 'christopher': ['chris'],
+        'matt': ['matthew'], 'matthew': ['matt'],
+        'dan': ['daniel'], 'daniel': ['dan'],
+        'nick': ['nicholas'], 'nicholas': ['nick'],
+        'joe': ['joseph'], 'joseph': ['joe'],
+        'will': ['william'], 'william': ['will'],
+        'ben': ['benjamin'], 'benjamin': ['ben'],
+        'tom': ['thomas'], 'thomas': ['tom'],
+        'rob': ['robert'], 'robert': ['rob', 'bob'], 'bob': ['robert'],
+        'tony': ['anthony'], 'anthony': ['tony'],
+        'jim': ['james', 'jimmy'], 'james': ['jim', 'jimmy'], 'jimmy': ['james', 'jim'],
+        'tj': ['t.j.'], 't.j.': ['tj'],
+        'cj': ['c.j.'], 'c.j.': ['cj'],
+        'dj': ['d.j.'], 'd.j.': ['dj'],
+        'aj': ['a.j.'], 'a.j.': ['aj']
+    };
+    
+    if (nicknames[first1] && nicknames[first1].includes(first2)) return true;
+    if (nicknames[first2] && nicknames[first2].includes(first1)) return true;
+    
+    return false;
+}
+
+// Fetch career history for a player by searching stats across teams/years
+async function fetchCareerHistory(playerName, knownTeams = []) {
+    const cacheKey = playerName.toLowerCase();
+    const now = Date.now();
+    
+    // Check cache
+    if (playerStatsCache[cacheKey] && (now - playerStatsCache[cacheKey].timestamp) < PLAYER_STATS_CACHE_DURATION) {
+        return playerStatsCache[cacheKey].history;
+    }
+    
+    const history = [];
+    const yearsToCheck = [2025, 2024, 2023, 2022, 2021];
+    const teamsToSearch = [...new Set(knownTeams)]; // Remove duplicates
+    
+    // If no known teams, we can't search (would need to search all 132 teams)
+    if (teamsToSearch.length === 0) {
+        return history;
+    }
+    
+    for (const team of teamsToSearch) {
+        for (const year of yearsToCheck) {
+            try {
+                // Fetch stats for this team/year
+                const stats = await fetchFromCFBD(`/stats/player/season?team=${encodeURIComponent(team)}&year=${year}`);
+                
+                // Look for this player (with fuzzy matching)
+                const playerStats = stats.find(p => fuzzyNameMatch(p.player, playerName));
+                
+                if (playerStats) {
+                    // Check if we already have this team/year combo
+                    const existing = history.find(h => h.team === team && h.year === year);
+                    if (!existing) {
+                        history.push({ team, year });
+                    }
+                }
+                
+                // Small delay to avoid rate limiting
+                await new Promise(resolve => setTimeout(resolve, 50));
+                
+            } catch (error) {
+                console.log(`⚠️ Could not fetch stats for ${team} ${year}: ${error.message}`);
+            }
+        }
+    }
+    
+    // Sort by year descending
+    history.sort((a, b) => b.year - a.year);
+    
+    // Cache the result
+    playerStatsCache[cacheKey] = { history, timestamp: now };
+    
+    return history;
+}
+
+async function fetchTransferPortalData(year = 2026, includeCareerHistory = false) {
     // Check cache first (must match year)
     const now = Date.now();
     if (transferCache.data && transferCache.lastUpdated && 
@@ -290,6 +401,7 @@ async function fetchTransferPortalData(year = 2026) {
         // Process and organize by team
         const teamTransfers = {};
         
+        // First pass: organize players by team
         for (const transfer of transfers) {
             const fromTeam = normalizeTeamName(transfer.origin);
             const toTeam = normalizeTeamName(transfer.destination);
@@ -301,7 +413,10 @@ async function fetchTransferPortalData(year = 2026) {
                 stars: transfer.stars,
                 year: getEligibilityYear(transfer.eligibility),
                 transferDate: transfer.transferDate,
-                status: toTeam ? 'Committed' : 'Entered'
+                status: toTeam ? 'Committed' : 'Entered',
+                // Store origin for career lookup
+                _origin: fromTeam,
+                _destination: toTeam
             };
             
             // Add to "from" team's playersOut
@@ -347,6 +462,42 @@ async function fetchTransferPortalData(year = 2026) {
     }
 }
 
+// Fetch career history for a single player using stats API
+async function fetchPlayerCareerHistory(playerName, knownTeam) {
+    const history = [];
+    const yearsToCheck = [2025, 2024, 2023, 2022, 2021];
+    
+    // Start with the known team
+    const teamsToSearch = [knownTeam];
+    const teamsSearched = new Set();
+    
+    for (const team of teamsToSearch) {
+        if (teamsSearched.has(team)) continue;
+        teamsSearched.add(team);
+        
+        for (const year of yearsToCheck) {
+            try {
+                const stats = await fetchFromCFBD(`/stats/player/season?team=${encodeURIComponent(team)}&year=${year}`);
+                const playerStats = stats.find(p => fuzzyNameMatch(p.player, playerName));
+                
+                if (playerStats) {
+                    const existing = history.find(h => h.team === team && h.year === year);
+                    if (!existing) {
+                        history.push({ team, year });
+                    }
+                }
+            } catch (error) {
+                // Silent fail for individual lookups
+            }
+        }
+    }
+    
+    // Sort by year descending
+    history.sort((a, b) => b.year - a.year);
+    
+    return history;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // API ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -356,10 +507,11 @@ app.get('/', (req, res) => {
     res.json({
         status: 'ok',
         service: 'Transfer Portal API',
-        version: '1.0.0',
+        version: '1.1.0',
         endpoints: [
             'GET /api/transfers - Get all transfer data organized by team',
             'GET /api/transfers/:team - Get transfer data for a specific team',
+            'GET /api/career/:playerName - Get career history for a player',
             'GET /api/health - Health check with cache status'
         ]
     });
@@ -380,6 +532,106 @@ app.get('/api/health', (req, res) => {
         },
         cfbdConfigured: !!CFBD_API_KEY
     });
+});
+
+// Get career history for a player
+// Usage: /api/career/Cam%20Calhoun?team=Alabama
+app.get('/api/career/:playerName', async (req, res) => {
+    try {
+        const playerName = decodeURIComponent(req.params.playerName);
+        const knownTeam = req.query.team ? normalizeTeamName(decodeURIComponent(req.query.team)) : null;
+        
+        if (!knownTeam) {
+            return res.status(400).json({
+                error: 'Team parameter required',
+                usage: '/api/career/PlayerName?team=TeamName'
+            });
+        }
+        
+        console.log(`🔍 Looking up career history for ${playerName} (known team: ${knownTeam})`);
+        
+        // Search for player stats across multiple years
+        const history = [];
+        const yearsToCheck = [2025, 2024, 2023, 2022, 2021];
+        const teamsToSearch = new Set([knownTeam]);
+        const teamsChecked = new Set();
+        
+        // First, check the known team
+        for (const year of yearsToCheck) {
+            try {
+                const stats = await fetchFromCFBD(`/stats/player/season?team=${encodeURIComponent(knownTeam)}&year=${year}`);
+                const playerStats = stats.find(p => fuzzyNameMatch(p.player, playerName));
+                
+                if (playerStats) {
+                    history.push({ 
+                        team: knownTeam, 
+                        year: year,
+                        hasStats: true
+                    });
+                }
+            } catch (error) {
+                console.log(`⚠️ Could not fetch stats for ${knownTeam} ${year}`);
+            }
+        }
+        
+        teamsChecked.add(knownTeam);
+        
+        // If player has history, check for previous teams by looking at rosters
+        // This finds teams where the player had stats but wasn't at the known team
+        if (history.length > 0) {
+            // Check a few likely previous teams based on conference
+            const knownTeamInfo = TEAM_INFO[knownTeam];
+            if (knownTeamInfo) {
+                // Get other teams in same conference to check
+                const conferenceTeams = Object.entries(TEAM_INFO)
+                    .filter(([name, info]) => info.conference === knownTeamInfo.conference && name !== knownTeam)
+                    .map(([name]) => name)
+                    .slice(0, 5); // Limit to 5 teams to avoid too many API calls
+                
+                for (const otherTeam of conferenceTeams) {
+                    if (teamsChecked.has(otherTeam)) continue;
+                    teamsChecked.add(otherTeam);
+                    
+                    for (const year of yearsToCheck) {
+                        // Skip years where we already found the player at known team
+                        if (history.some(h => h.year === year)) continue;
+                        
+                        try {
+                            const stats = await fetchFromCFBD(`/stats/player/season?team=${encodeURIComponent(otherTeam)}&year=${year}`);
+                            const playerStats = stats.find(p => fuzzyNameMatch(p.player, playerName));
+                            
+                            if (playerStats) {
+                                history.push({ 
+                                    team: otherTeam, 
+                                    year: year,
+                                    hasStats: true
+                                });
+                            }
+                        } catch (error) {
+                            // Silent fail
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Sort by year descending
+        history.sort((a, b) => b.year - a.year);
+        
+        res.json({
+            player: playerName,
+            knownTeam: knownTeam,
+            careerHistory: history,
+            teamsSearched: Array.from(teamsChecked)
+        });
+        
+    } catch (error) {
+        console.error('Error in /api/career/:playerName:', error);
+        res.status(500).json({
+            error: 'Failed to fetch career history',
+            message: error.message
+        });
+    }
 });
 
 // Get all transfers (main endpoint for iOS app)
@@ -468,7 +720,7 @@ app.get('/api/teams', (req, res) => {
 
 // Roster cache (per team, 30 minute cache)
 const rosterCache = {};
-const ROSTER_CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours (CFBD updates once daily)
+const ROSTER_CACHE_DURATION_MS = 30 * 60 * 1000; // 30 minutes
 
 // Get roster for a specific team
 app.get('/api/roster/:team', async (req, res) => {
@@ -576,417 +828,6 @@ app.post('/api/refresh', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PLAYER STATS ENDPOINTS (Basic + Advanced)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// Stats cache
-const statsCache = {};
-const STATS_CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
-
-// Advanced stats cache (usage + PPA)
-const advancedStatsCache = {};
-
-// Helper: Get current season year
-function getCurrentSeasonYear() {
-    const now = new Date();
-    const month = now.getMonth() + 1; // JavaScript months are 0-indexed
-    const year = now.getFullYear();
-    // If before August, we're looking at previous season stats
-    return month >= 8 ? year : year - 1;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// AVAILABLE YEARS ENDPOINT - /api/stats/years
-// Returns list of years with available stats data
-// NOTE: Must be defined BEFORE /api/stats/:team to avoid route conflict
-// ═══════════════════════════════════════════════════════════════════════════════
-
-app.get('/api/stats/years', (req, res) => {
-    const currentYear = getCurrentSeasonYear();
-    const years = [];
-    
-    // Only show last 4 seasons - covers current roster players and transfers
-    // (Freshman through Senior + extra year COVID eligibility)
-    const yearsToShow = 4;
-    for (let year = currentYear; year >= currentYear - yearsToShow + 1; year--) {
-        years.push(year);
-    }
-    
-    res.json({
-        currentSeason: currentYear,
-        availableYears: years,
-        note: "Stats for current roster players and transfers (last 4 seasons)"
-    });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// BASIC STATS ENDPOINT - /api/stats/:team
-// Returns: passing, rushing, receiving, defensive, kicking, punting, returns
-// ═══════════════════════════════════════════════════════════════════════════════
-
-app.get('/api/stats/:team', async (req, res) => {
-    try {
-        const teamName = normalizeTeamName(decodeURIComponent(req.params.team));
-        const year = parseInt(req.query.year) || getCurrentSeasonYear();
-        
-        if (!TEAM_INFO[teamName]) {
-            return res.status(404).json({
-                error: 'Team not found',
-                team: req.params.team,
-                suggestion: 'Check /api/teams for valid team names'
-            });
-        }
-        
-        // Check cache
-        const cacheKey = `stats-${teamName}-${year}`;
-        const now = Date.now();
-        if (statsCache[cacheKey] && (now - statsCache[cacheKey].lastUpdated) < STATS_CACHE_DURATION_MS) {
-            console.log(`📦 Using cached stats for ${teamName} (${year})`);
-            return res.json(statsCache[cacheKey].data);
-        }
-        
-        console.log(`🔄 Fetching fresh stats for ${teamName} (${year})...`);
-        
-        // Fetch all stat categories from CFBD
-        const [passing, rushing, receiving, defensive, kicking, punting, kickReturns, puntReturns, interceptions, fumbles] = await Promise.all([
-            fetchFromCFBD(`/stats/player/season?year=${year}&team=${encodeURIComponent(teamName)}&category=passing`).catch(() => []),
-            fetchFromCFBD(`/stats/player/season?year=${year}&team=${encodeURIComponent(teamName)}&category=rushing`).catch(() => []),
-            fetchFromCFBD(`/stats/player/season?year=${year}&team=${encodeURIComponent(teamName)}&category=receiving`).catch(() => []),
-            fetchFromCFBD(`/stats/player/season?year=${year}&team=${encodeURIComponent(teamName)}&category=defensive`).catch(() => []),
-            fetchFromCFBD(`/stats/player/season?year=${year}&team=${encodeURIComponent(teamName)}&category=kicking`).catch(() => []),
-            fetchFromCFBD(`/stats/player/season?year=${year}&team=${encodeURIComponent(teamName)}&category=punting`).catch(() => []),
-            fetchFromCFBD(`/stats/player/season?year=${year}&team=${encodeURIComponent(teamName)}&category=kickReturns`).catch(() => []),
-            fetchFromCFBD(`/stats/player/season?year=${year}&team=${encodeURIComponent(teamName)}&category=puntReturns`).catch(() => []),
-            fetchFromCFBD(`/stats/player/season?year=${year}&team=${encodeURIComponent(teamName)}&category=interceptions`).catch(() => []),
-            fetchFromCFBD(`/stats/player/season?year=${year}&team=${encodeURIComponent(teamName)}&category=fumbles`).catch(() => [])
-        ]);
-        
-        // Combine all stats by player
-        const playerStatsMap = {};
-        
-        // Helper to add stats to player
-        const addPlayerStats = (statsArray, category) => {
-            for (const stat of statsArray) {
-                const playerId = stat.playerId || stat.player_id || `${stat.player}-${stat.team}`;
-                const playerName = stat.player;
-                
-                if (!playerStatsMap[playerId]) {
-                    playerStatsMap[playerId] = {
-                        playerId: String(playerId),
-                        name: playerName,
-                        team: teamName
-                    };
-                }
-                
-                // Parse stat type and value
-                const statType = stat.statType || stat.stat_type;
-                const statValue = parseFloat(stat.stat) || 0;
-                
-                if (!playerStatsMap[playerId][category]) {
-                    playerStatsMap[playerId][category] = {};
-                }
-                
-                playerStatsMap[playerId][category][statType] = statValue;
-            }
-        };
-        
-        // Process each category
-        addPlayerStats(passing, 'passing');
-        addPlayerStats(rushing, 'rushing');
-        addPlayerStats(receiving, 'receiving');
-        addPlayerStats(defensive, 'defensive');
-        addPlayerStats(kicking, 'kicking');
-        addPlayerStats(punting, 'punting');
-        addPlayerStats(kickReturns, 'kickReturns');
-        addPlayerStats(puntReturns, 'puntReturns');
-        addPlayerStats(interceptions, 'interceptions');
-        addPlayerStats(fumbles, 'fumbles');
-        
-        // Convert to array and clean up stats
-        const players = Object.values(playerStatsMap).map(player => {
-            // Clean up passing stats
-            if (player.passing) {
-                player.passing = {
-                    completions: player.passing.COMPLETIONS || player.passing.completions || 0,
-                    attempts: player.passing.ATT || player.passing.attempts || 0,
-                    yards: player.passing.YDS || player.passing.yards || 0,
-                    touchdowns: player.passing.TD || player.passing.touchdowns || 0,
-                    interceptions: player.passing.INT || player.passing.interceptions || 0,
-                    yardsPerAttempt: player.passing.YPA || player.passing.yardsPerAttempt || null,
-                    qbRating: player.passing.QBR || player.passing.qbRating || null,
-                    long: player.passing.LONG || player.passing.long || null
-                };
-            }
-            
-            // Clean up rushing stats
-            if (player.rushing) {
-                player.rushing = {
-                    carries: player.rushing.CAR || player.rushing.carries || 0,
-                    yards: player.rushing.YDS || player.rushing.yards || 0,
-                    touchdowns: player.rushing.TD || player.rushing.touchdowns || 0,
-                    yardsPerCarry: player.rushing.YPC || player.rushing.yardsPerCarry || null,
-                    long: player.rushing.LONG || player.rushing.long || null
-                };
-            }
-            
-            // Clean up receiving stats
-            if (player.receiving) {
-                player.receiving = {
-                    receptions: player.receiving.REC || player.receiving.receptions || 0,
-                    yards: player.receiving.YDS || player.receiving.yards || 0,
-                    touchdowns: player.receiving.TD || player.receiving.touchdowns || 0,
-                    yardsPerReception: player.receiving.YPR || player.receiving.yardsPerReception || null,
-                    long: player.receiving.LONG || player.receiving.long || null
-                };
-            }
-            
-            // Clean up defensive stats
-            if (player.defensive) {
-                player.defensive = {
-                    totalTackles: player.defensive.TOT || player.defensive.TACKLES || player.defensive.totalTackles || 0,
-                    soloTackles: player.defensive.SOLO || player.defensive.soloTackles || 0,
-                    sacks: player.defensive.SACKS || player.defensive.sacks || 0,
-                    tacklesForLoss: player.defensive.TFL || player.defensive.tacklesForLoss || 0,
-                    passesDefended: player.defensive.PD || player.defensive.passesDefended || 0,
-                    qbHurries: player.defensive.QBH || player.defensive.qbHurries || 0,
-                    defensiveTDs: player.defensive.TD || player.defensive.defensiveTDs || 0
-                };
-            }
-            
-            // Add interceptions to defensive stats
-            if (player.interceptions) {
-                if (!player.defensive) player.defensive = {};
-                player.defensive.interceptions = player.interceptions.INT || player.interceptions.interceptions || 0;
-                player.defensive.intYards = player.interceptions.YDS || player.interceptions.yards || 0;
-                player.defensive.intTDs = player.interceptions.TD || player.interceptions.touchdowns || 0;
-                delete player.interceptions;
-            }
-            
-            // Add fumbles to defensive stats
-            if (player.fumbles) {
-                if (!player.defensive) player.defensive = {};
-                player.defensive.fumblesRecovered = player.fumbles.REC || player.fumbles.recovered || 0;
-                player.defensive.fumblesTDs = player.fumbles.TD || player.fumbles.touchdowns || 0;
-                delete player.fumbles;
-            }
-            
-            // Clean up kicking stats
-            if (player.kicking) {
-                player.kicking = {
-                    fgMade: player.kicking.FGM || player.kicking.fgMade || 0,
-                    fgAttempts: player.kicking.FGA || player.kicking.fgAttempts || 0,
-                    fgPercentage: player.kicking.PCT || player.kicking.fgPercentage || null,
-                    xpMade: player.kicking.XPM || player.kicking.xpMade || 0,
-                    xpAttempts: player.kicking.XPA || player.kicking.xpAttempts || 0,
-                    points: player.kicking.PTS || player.kicking.points || 0,
-                    long: player.kicking.LONG || player.kicking.long || null
-                };
-            }
-            
-            // Clean up punting stats
-            if (player.punting) {
-                player.punting = {
-                    punts: player.punting.NO || player.punting.punts || 0,
-                    yards: player.punting.YDS || player.punting.yards || 0,
-                    average: player.punting.AVG || player.punting.average || null,
-                    long: player.punting.LONG || player.punting.long || null,
-                    inside20: player.punting.IN20 || player.punting.inside20 || 0,
-                    touchbacks: player.punting.TB || player.punting.touchbacks || 0
-                };
-            }
-            
-            // Clean up kick returns
-            if (player.kickReturns) {
-                player.kickReturns = {
-                    returns: player.kickReturns.NO || player.kickReturns.returns || 0,
-                    yards: player.kickReturns.YDS || player.kickReturns.yards || 0,
-                    average: player.kickReturns.AVG || player.kickReturns.average || null,
-                    touchdowns: player.kickReturns.TD || player.kickReturns.touchdowns || 0,
-                    long: player.kickReturns.LONG || player.kickReturns.long || null
-                };
-            }
-            
-            // Clean up punt returns
-            if (player.puntReturns) {
-                player.puntReturns = {
-                    returns: player.puntReturns.NO || player.puntReturns.returns || 0,
-                    yards: player.puntReturns.YDS || player.puntReturns.yards || 0,
-                    average: player.puntReturns.AVG || player.puntReturns.average || null,
-                    touchdowns: player.puntReturns.TD || player.puntReturns.touchdowns || 0,
-                    long: player.puntReturns.LONG || player.puntReturns.long || null
-                };
-            }
-            
-            return player;
-        });
-        
-        // Sort by total production (yards)
-        players.sort((a, b) => {
-            const aYards = (a.passing?.yards || 0) + (a.rushing?.yards || 0) + (a.receiving?.yards || 0);
-            const bYards = (b.passing?.yards || 0) + (b.rushing?.yards || 0) + (b.receiving?.yards || 0);
-            return bYards - aYards;
-        });
-        
-        const responseData = {
-            team: teamName,
-            info: TEAM_INFO[teamName],
-            year: year,
-            playerCount: players.length,
-            players: players,
-            lastUpdated: new Date().toISOString()
-        };
-        
-        // Cache the result
-        statsCache[cacheKey] = {
-            data: responseData,
-            lastUpdated: now
-        };
-        
-        res.json(responseData);
-        
-    } catch (error) {
-        console.error('Error in /api/stats/:team:', error);
-        res.status(500).json({
-            error: 'Failed to fetch stats data',
-            message: error.message
-        });
-    }
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ADVANCED STATS ENDPOINT - /api/stats/advanced/:team
-// Returns: usage metrics, PPA (Predicted Points Added)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-app.get('/api/stats/advanced/:team', async (req, res) => {
-    try {
-        const teamName = normalizeTeamName(decodeURIComponent(req.params.team));
-        const year = parseInt(req.query.year) || getCurrentSeasonYear();
-        
-        if (!TEAM_INFO[teamName]) {
-            return res.status(404).json({
-                error: 'Team not found',
-                team: req.params.team,
-                suggestion: 'Check /api/teams for valid team names'
-            });
-        }
-        
-        // Check cache
-        const cacheKey = `advanced-${teamName}-${year}`;
-        const now = Date.now();
-        if (advancedStatsCache[cacheKey] && (now - advancedStatsCache[cacheKey].lastUpdated) < STATS_CACHE_DURATION_MS) {
-            console.log(`📦 Using cached advanced stats for ${teamName} (${year})`);
-            return res.json(advancedStatsCache[cacheKey].data);
-        }
-        
-        console.log(`🔄 Fetching fresh advanced stats for ${teamName} (${year})...`);
-        
-        // Fetch usage and PPA data from CFBD
-        const [usageData, ppaData] = await Promise.all([
-            fetchFromCFBD(`/player/usage?year=${year}&team=${encodeURIComponent(teamName)}`).catch(() => []),
-            fetchFromCFBD(`/ppa/players/season?year=${year}&team=${encodeURIComponent(teamName)}`).catch(() => [])
-        ]);
-        
-        // Combine stats by player
-        const playerStatsMap = {};
-        
-        // Process usage data
-        for (const player of usageData) {
-            const playerId = player.id || player.playerId || `${player.name}-${teamName}`;
-            
-            playerStatsMap[playerId] = {
-                playerId: String(playerId),
-                name: player.name,
-                team: teamName,
-                position: player.position,
-                usage: {
-                    overall: player.usage?.overall || 0,
-                    pass: player.usage?.pass || 0,
-                    rush: player.usage?.rush || 0,
-                    firstDown: player.usage?.firstDown || null,
-                    secondDown: player.usage?.secondDown || null,
-                    thirdDown: player.usage?.thirdDown || null,
-                    standardDowns: player.usage?.standardDowns || null,
-                    passingDowns: player.usage?.passingDowns || null
-                }
-            };
-        }
-        
-        // Process PPA data
-        for (const player of ppaData) {
-            const playerId = player.id || player.playerId || `${player.name}-${teamName}`;
-            
-            if (!playerStatsMap[playerId]) {
-                playerStatsMap[playerId] = {
-                    playerId: String(playerId),
-                    name: player.name,
-                    team: teamName,
-                    position: player.position
-                };
-            }
-            
-            playerStatsMap[playerId].ppa = {
-                countablePlays: player.countablePlays || 0,
-                averages: {
-                    all: player.averagePPA?.all || null,
-                    pass: player.averagePPA?.pass || null,
-                    rush: player.averagePPA?.rush || null,
-                    firstDown: player.averagePPA?.firstDown || null,
-                    secondDown: player.averagePPA?.secondDown || null,
-                    thirdDown: player.averagePPA?.thirdDown || null,
-                    standardDowns: player.averagePPA?.standardDowns || null,
-                    passingDowns: player.averagePPA?.passingDowns || null
-                },
-                totals: {
-                    all: player.totalPPA?.all || null,
-                    pass: player.totalPPA?.pass || null,
-                    rush: player.totalPPA?.rush || null,
-                    firstDown: player.totalPPA?.firstDown || null,
-                    secondDown: player.totalPPA?.secondDown || null,
-                    thirdDown: player.totalPPA?.thirdDown || null,
-                    standardDowns: player.totalPPA?.standardDowns || null,
-                    passingDowns: player.totalPPA?.passingDowns || null
-                }
-            };
-        }
-        
-        // Convert to array
-        const players = Object.values(playerStatsMap);
-        
-        // Sort by total PPA (descending)
-        players.sort((a, b) => {
-            const aPPA = a.ppa?.totals?.all || 0;
-            const bPPA = b.ppa?.totals?.all || 0;
-            return bPPA - aPPA;
-        });
-        
-        const responseData = {
-            team: teamName,
-            info: TEAM_INFO[teamName],
-            year: year,
-            playerCount: players.length,
-            players: players,
-            lastUpdated: new Date().toISOString()
-        };
-        
-        // Cache the result
-        advancedStatsCache[cacheKey] = {
-            data: responseData,
-            lastUpdated: now
-        };
-        
-        res.json(responseData);
-        
-    } catch (error) {
-        console.error('Error in /api/stats/advanced/:team:', error);
-        res.status(500).json({
-            error: 'Failed to fetch advanced stats data',
-            message: error.message
-        });
-    }
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // START SERVER (for local development)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1003,15 +844,11 @@ if (require.main === module) {
 ║   Local:  http://localhost:${PORT}                            ║
 ║                                                              ║
 ║   Endpoints:                                                 ║
-║   • GET  /api/transfers         - All transfer data          ║
-║   • GET  /api/transfers/:team   - Team-specific transfers    ║
-║   • GET  /api/teams             - List all teams             ║
-║   • GET  /api/roster/:team      - Team roster                ║
-║   • GET  /api/stats/:team       - Basic player stats         ║
-║   • GET  /api/stats/advanced/:team - Advanced analytics      ║
-║   • GET  /api/stats/years       - Available stat years       ║
-║   • GET  /api/health            - Health check               ║
-║   • POST /api/refresh           - Force cache refresh        ║
+║   • GET  /api/transfers     - All transfer data             ║
+║   • GET  /api/transfers/:team - Team-specific data          ║
+║   • GET  /api/teams         - List all teams                ║
+║   • GET  /api/health        - Health check                  ║
+║   • POST /api/refresh       - Force cache refresh           ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
         `);
@@ -1020,5 +857,3 @@ if (require.main === module) {
 
 // Export for Vercel
 module.exports = app;
-
-
