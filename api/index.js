@@ -991,6 +991,279 @@ app.get('/api/teams', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// STATS ENDPOINTS (Basic & Advanced)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Stats cache (per team/year, 30 minute cache)
+const statsCache = {};
+const advancedStatsCache = {};
+const STATS_CACHE_DURATION_MS = 30 * 60 * 1000; // 30 minutes
+
+// Get basic player stats for a team
+app.get('/api/stats/:team', async (req, res) => {
+    try {
+        const teamName = normalizeTeamName(decodeURIComponent(req.params.team));
+        const year = parseInt(req.query.year) || 2024;
+        
+        if (!TEAM_INFO[teamName]) {
+            return res.status(404).json({
+                error: 'Team not found',
+                team: req.params.team
+            });
+        }
+        
+        // Check cache
+        const cacheKey = `${teamName}-${year}`;
+        const now = Date.now();
+        if (statsCache[cacheKey] && (now - statsCache[cacheKey].lastUpdated) < STATS_CACHE_DURATION_MS) {
+            console.log(`📦 Using cached stats for ${teamName} ${year}`);
+            return res.json(statsCache[cacheKey].data);
+        }
+        
+        console.log(`🔄 Fetching stats for ${teamName} ${year}...`);
+        
+        // Fetch player season stats from CFBD
+        const stats = await fetchFromCFBD(`/stats/player/season?team=${encodeURIComponent(teamName)}&year=${year}`);
+        
+        // Group stats by player
+        const playerStatsMap = {};
+        
+        for (const stat of stats) {
+            const playerId = stat.playerId || stat.player;
+            if (!playerStatsMap[playerId]) {
+                playerStatsMap[playerId] = {
+                    id: String(stat.playerId || ''),
+                    name: stat.player || 'Unknown',
+                    team: teamName,
+                    position: stat.category || '',
+                    year: year,
+                    passing: null,
+                    rushing: null,
+                    receiving: null,
+                    defensive: null,
+                    kicking: null,
+                    punting: null,
+                    returns: null
+                };
+            }
+            
+            const player = playerStatsMap[playerId];
+            const category = (stat.category || '').toLowerCase();
+            const statType = (stat.statType || stat.stat_type || '').toLowerCase();
+            const value = parseFloat(stat.stat) || 0;
+            
+            // Organize stats by category
+            if (category === 'passing') {
+                if (!player.passing) player.passing = {};
+                if (statType === 'completions' || statType === 'comp') player.passing.completions = value;
+                if (statType === 'att' || statType === 'attempts') player.passing.attempts = value;
+                if (statType === 'yds' || statType === 'yards') player.passing.yards = value;
+                if (statType === 'td' || statType === 'touchdowns') player.passing.touchdowns = value;
+                if (statType === 'int' || statType === 'interceptions') player.passing.interceptions = value;
+                if (statType === 'qbr') player.passing.qbr = value;
+                if (statType === 'passer_rating' || statType === 'rating') player.passing.rating = value;
+            } else if (category === 'rushing') {
+                if (!player.rushing) player.rushing = {};
+                if (statType === 'car' || statType === 'carries' || statType === 'att') player.rushing.carries = value;
+                if (statType === 'yds' || statType === 'yards') player.rushing.yards = value;
+                if (statType === 'td' || statType === 'touchdowns') player.rushing.touchdowns = value;
+                if (statType === 'avg' || statType === 'ypc') player.rushing.yardsPerCarry = value;
+                if (statType === 'long' || statType === 'longest') player.rushing.long = value;
+            } else if (category === 'receiving') {
+                if (!player.receiving) player.receiving = {};
+                if (statType === 'rec' || statType === 'receptions') player.receiving.receptions = value;
+                if (statType === 'yds' || statType === 'yards') player.receiving.yards = value;
+                if (statType === 'td' || statType === 'touchdowns') player.receiving.touchdowns = value;
+                if (statType === 'avg' || statType === 'ypr') player.receiving.yardsPerReception = value;
+                if (statType === 'long' || statType === 'longest') player.receiving.long = value;
+            } else if (category === 'defensive' || category === 'defense') {
+                if (!player.defensive) player.defensive = {};
+                if (statType === 'tot' || statType === 'tackles' || statType === 'total') player.defensive.tackles = value;
+                if (statType === 'solo') player.defensive.soloTackles = value;
+                if (statType === 'ast' || statType === 'assists') player.defensive.assistedTackles = value;
+                if (statType === 'tfl' || statType === 'tackles_for_loss') player.defensive.tacklesForLoss = value;
+                if (statType === 'sacks' || statType === 'sack') player.defensive.sacks = value;
+                if (statType === 'int' || statType === 'interceptions') player.defensive.interceptions = value;
+                if (statType === 'pd' || statType === 'passes_defended') player.defensive.passesDefended = value;
+                if (statType === 'ff' || statType === 'forced_fumbles') player.defensive.forcedFumbles = value;
+                if (statType === 'fr' || statType === 'fumble_recoveries') player.defensive.fumbleRecoveries = value;
+            } else if (category === 'kicking') {
+                if (!player.kicking) player.kicking = {};
+                if (statType === 'fgm' || statType === 'field_goals_made') player.kicking.fieldGoalsMade = value;
+                if (statType === 'fga' || statType === 'field_goals_attempted') player.kicking.fieldGoalsAttempted = value;
+                if (statType === 'xpm' || statType === 'extra_points_made') player.kicking.extraPointsMade = value;
+                if (statType === 'xpa' || statType === 'extra_points_attempted') player.kicking.extraPointsAttempted = value;
+                if (statType === 'pts' || statType === 'points') player.kicking.points = value;
+                if (statType === 'long' || statType === 'longest') player.kicking.long = value;
+            } else if (category === 'punting') {
+                if (!player.punting) player.punting = {};
+                if (statType === 'no' || statType === 'punts') player.punting.punts = value;
+                if (statType === 'yds' || statType === 'yards') player.punting.yards = value;
+                if (statType === 'avg' || statType === 'average') player.punting.average = value;
+                if (statType === 'tb' || statType === 'touchbacks') player.punting.touchbacks = value;
+                if (statType === 'in20' || statType === 'inside_20') player.punting.inside20 = value;
+                if (statType === 'long' || statType === 'longest') player.punting.long = value;
+            } else if (category === 'kickreturns' || category === 'puntreturns') {
+                if (!player.returns) player.returns = {};
+                if (category === 'kickreturns') {
+                    if (statType === 'no' || statType === 'returns') player.returns.kickReturns = value;
+                    if (statType === 'yds' || statType === 'yards') player.returns.kickReturnYards = value;
+                    if (statType === 'td' || statType === 'touchdowns') player.returns.kickReturnTouchdowns = value;
+                } else {
+                    if (statType === 'no' || statType === 'returns') player.returns.puntReturns = value;
+                    if (statType === 'yds' || statType === 'yards') player.returns.puntReturnYards = value;
+                    if (statType === 'td' || statType === 'touchdowns') player.returns.puntReturnTouchdowns = value;
+                }
+            }
+        }
+        
+        // Convert to array and filter out players with no stats
+        const players = Object.values(playerStatsMap).filter(p => 
+            p.passing || p.rushing || p.receiving || p.defensive || p.kicking || p.punting || p.returns
+        );
+        
+        const response = {
+            team: teamName,
+            year: year,
+            playerCount: players.length,
+            players: players
+        };
+        
+        // Cache the response
+        statsCache[cacheKey] = {
+            data: response,
+            lastUpdated: now
+        };
+        
+        console.log(`✅ Found ${players.length} players with stats for ${teamName} ${year}`);
+        res.json(response);
+        
+    } catch (error) {
+        console.error(`❌ Error fetching stats for ${req.params.team}:`, error.message);
+        res.status(500).json({
+            error: 'Failed to fetch stats',
+            message: error.message
+        });
+    }
+});
+
+// Get advanced player stats (PPA, usage) for a team
+app.get('/api/advanced-stats/:team', async (req, res) => {
+    try {
+        const teamName = normalizeTeamName(decodeURIComponent(req.params.team));
+        const year = parseInt(req.query.year) || 2024;
+        
+        if (!TEAM_INFO[teamName]) {
+            return res.status(404).json({
+                error: 'Team not found',
+                team: req.params.team
+            });
+        }
+        
+        // Check cache
+        const cacheKey = `${teamName}-${year}`;
+        const now = Date.now();
+        if (advancedStatsCache[cacheKey] && (now - advancedStatsCache[cacheKey].lastUpdated) < STATS_CACHE_DURATION_MS) {
+            console.log(`📦 Using cached advanced stats for ${teamName} ${year}`);
+            return res.json(advancedStatsCache[cacheKey].data);
+        }
+        
+        console.log(`🔄 Fetching advanced stats for ${teamName} ${year}...`);
+        
+        // Fetch PPA (Predicted Points Added) and usage stats
+        const [ppaData, usageData] = await Promise.all([
+            fetchFromCFBD(`/ppa/players/season?team=${encodeURIComponent(teamName)}&year=${year}`).catch(() => []),
+            fetchFromCFBD(`/player/usage?team=${encodeURIComponent(teamName)}&year=${year}`).catch(() => [])
+        ]);
+        
+        // Merge PPA and usage data by player name
+        const playerStatsMap = {};
+        
+        // Process PPA data
+        for (const ppa of ppaData) {
+            const playerName = ppa.name || ppa.player;
+            if (!playerName) continue;
+            
+            if (!playerStatsMap[playerName]) {
+                playerStatsMap[playerName] = {
+                    id: String(ppa.id || ''),
+                    name: playerName,
+                    team: teamName,
+                    position: ppa.position || '',
+                    year: year,
+                    ppa: null,
+                    usage: null
+                };
+            }
+            
+            playerStatsMap[playerName].ppa = {
+                total: ppa.averagePPA?.all || ppa.average_ppa?.all || 0,
+                passing: ppa.averagePPA?.pass || ppa.average_ppa?.pass || 0,
+                rushing: ppa.averagePPA?.rush || ppa.average_ppa?.rush || 0,
+                totalPPA: ppa.totalPPA?.all || ppa.total_ppa?.all || 0,
+                passingPPA: ppa.totalPPA?.pass || ppa.total_ppa?.pass || 0,
+                rushingPPA: ppa.totalPPA?.rush || ppa.total_ppa?.rush || 0
+            };
+        }
+        
+        // Process usage data
+        for (const usage of usageData) {
+            const playerName = usage.name || usage.player;
+            if (!playerName) continue;
+            
+            if (!playerStatsMap[playerName]) {
+                playerStatsMap[playerName] = {
+                    id: String(usage.id || ''),
+                    name: playerName,
+                    team: teamName,
+                    position: usage.position || '',
+                    year: year,
+                    ppa: null,
+                    usage: null
+                };
+            }
+            
+            playerStatsMap[playerName].usage = {
+                overall: usage.usage?.overall || 0,
+                passing: usage.usage?.pass || 0,
+                rushing: usage.usage?.rush || 0,
+                firstDown: usage.usage?.firstDown || 0,
+                secondDown: usage.usage?.secondDown || 0,
+                thirdDown: usage.usage?.thirdDown || 0,
+                standardDowns: usage.usage?.standardDowns || 0,
+                passingDowns: usage.usage?.passingDowns || 0
+            };
+        }
+        
+        // Convert to array and filter out players with no advanced stats
+        const players = Object.values(playerStatsMap).filter(p => p.ppa || p.usage);
+        
+        const response = {
+            team: teamName,
+            year: year,
+            playerCount: players.length,
+            players: players
+        };
+        
+        // Cache the response
+        advancedStatsCache[cacheKey] = {
+            data: response,
+            lastUpdated: now
+        };
+        
+        console.log(`✅ Found ${players.length} players with advanced stats for ${teamName} ${year}`);
+        res.json(response);
+        
+    } catch (error) {
+        console.error(`❌ Error fetching advanced stats for ${req.params.team}:`, error.message);
+        res.status(500).json({
+            error: 'Failed to fetch advanced stats',
+            message: error.message
+        });
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ROSTER ENDPOINT
 // ═══════════════════════════════════════════════════════════════════════════════
 
