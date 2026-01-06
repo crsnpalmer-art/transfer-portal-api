@@ -398,21 +398,13 @@ async function fetchTransferPortalData(year = 2026) {
     try {
         const transfers = await fetchFromCFBD(`/player/portal?year=${year}`);
         
-        // Process and organize by team
+        // Process and organize by team (FAST - no extra API calls)
         const teamTransfers = {};
         
-        // Track which teams we need rosters for
-        const teamsNeedingRosters = new Set();
-        
-        // First pass: organize players by team and collect teams needing rosters
         for (const transfer of transfers) {
             const fromTeam = normalizeTeamName(transfer.origin);
             const toTeam = normalizeTeamName(transfer.destination);
             const playerName = `${transfer.firstName} ${transfer.lastName}`;
-            
-            // Track teams we need to fetch rosters for
-            if (fromTeam && TEAM_INFO[fromTeam]) teamsNeedingRosters.add(fromTeam);
-            if (toTeam && TEAM_INFO[toTeam]) teamsNeedingRosters.add(toTeam);
             
             const playerData = {
                 name: playerName,
@@ -425,8 +417,8 @@ async function fetchTransferPortalData(year = 2026) {
                 transferDate: transfer.transferDate,
                 status: toTeam ? 'Committed' : 'Entered',
                 origin: fromTeam,
-                careerHistory: [],
-                playerId: null // Will be populated from roster matching
+                careerHistory: [], // Fetched lazily when viewing player
+                playerId: null     // Fetched lazily when viewing player
             };
             
             // Add to "from" team's playersOut
@@ -454,122 +446,7 @@ async function fetchTransferPortalData(year = 2026) {
             }
         }
         
-        // Second pass: Fetch rosters and match player IDs
-        console.log(`🔍 Fetching rosters for ${teamsNeedingRosters.size} teams to match player IDs...`);
-        const rostersByTeam = {};
-        
-        for (const teamName of teamsNeedingRosters) {
-            try {
-                // Try current year roster first, fallback to previous year
-                let roster = await fetchFromCFBD(`/roster?team=${encodeURIComponent(teamName)}&year=2025`);
-                if (!roster || roster.length === 0) {
-                    roster = await fetchFromCFBD(`/roster?team=${encodeURIComponent(teamName)}&year=2024`);
-                }
-                rostersByTeam[teamName] = roster || [];
-                
-                // Small delay to avoid rate limiting
-                await new Promise(resolve => setTimeout(resolve, 20));
-            } catch (error) {
-                console.log(`⚠️ Could not fetch roster for ${teamName}: ${error.message}`);
-                rostersByTeam[teamName] = [];
-            }
-        }
-        
-        // Third pass: Match player IDs from rosters
-        console.log(`🔗 Matching player IDs...`);
-        for (const teamName of Object.keys(teamTransfers)) {
-            const team = teamTransfers[teamName];
-            
-            // Match playersOut against their origin team's roster
-            for (const player of team.playersOut) {
-                const originTeam = player.origin || teamName;
-                const roster = rostersByTeam[originTeam] || [];
-                const matchedPlayer = findPlayerInRoster(player, roster);
-                if (matchedPlayer) {
-                    player.playerId = String(matchedPlayer.id);
-                    // Also grab bio data if available
-                    player.height = matchedPlayer.height;
-                    player.weight = matchedPlayer.weight;
-                    player.hometown = formatHometown(matchedPlayer);
-                }
-            }
-            
-            // Match playersIn against their origin team's roster (where they transferred from)
-            for (const player of team.playersIn) {
-                const originTeam = player.from || player.origin;
-                const roster = rostersByTeam[originTeam] || [];
-                const matchedPlayer = findPlayerInRoster(player, roster);
-                if (matchedPlayer) {
-                    player.playerId = String(matchedPlayer.id);
-                    player.height = matchedPlayer.height;
-                    player.weight = matchedPlayer.weight;
-                    player.hometown = formatHometown(matchedPlayer);
-                }
-            }
-        }
-        
-        // Fourth pass: fetch career history for each unique player
-        console.log(`🔍 Fetching career history for players...`);
-        const processedPlayers = new Set();
-        
-        for (const teamName of Object.keys(teamTransfers)) {
-            const team = teamTransfers[teamName];
-            
-            // Process playersOut
-            for (const player of team.playersOut) {
-                const playerKey = player.name.toLowerCase();
-                if (processedPlayers.has(playerKey)) {
-                    // Copy career history from already processed player
-                    const existingPlayer = findPlayerInCache(teamTransfers, player.name);
-                    if (existingPlayer) {
-                        player.careerHistory = existingPlayer.careerHistory;
-                    }
-                    continue;
-                }
-                processedPlayers.add(playerKey);
-                
-                // Fetch career history using the origin team
-                const knownTeam = player.origin || teamName;
-                player.careerHistory = await fetchCareerHistoryForPlayer(player.name, knownTeam);
-                
-                // Small delay to avoid rate limiting
-                await new Promise(resolve => setTimeout(resolve, 30));
-            }
-            
-            // Process playersIn
-            for (const player of team.playersIn) {
-                const playerKey = player.name.toLowerCase();
-                if (processedPlayers.has(playerKey)) {
-                    // Copy career history from already processed player
-                    const existingPlayer = findPlayerInCache(teamTransfers, player.name);
-                    if (existingPlayer) {
-                        player.careerHistory = existingPlayer.careerHistory;
-                    }
-                    continue;
-                }
-                processedPlayers.add(playerKey);
-                
-                // Fetch career history using the from team
-                const knownTeam = player.from || teamName;
-                player.careerHistory = await fetchCareerHistoryForPlayer(player.name, knownTeam);
-                
-                // Small delay to avoid rate limiting
-                await new Promise(resolve => setTimeout(resolve, 30));
-            }
-        }
-        
-        // Count how many players got IDs matched
-        let matchedCount = 0;
-        let totalCount = 0;
-        for (const team of Object.values(teamTransfers)) {
-            for (const player of [...team.playersOut, ...team.playersIn]) {
-                totalCount++;
-                if (player.playerId) matchedCount++;
-            }
-        }
-        console.log(`✅ Matched ${matchedCount}/${totalCount} players with IDs (${Math.round(matchedCount/totalCount*100)}%)`);
-        
-        console.log(`✅ Processed ${transfers.length} transfers with career history for ${Object.keys(teamTransfers).length} teams`);
+        console.log(`✅ Processed ${transfers.length} transfers for ${Object.keys(teamTransfers).length} teams`);
         
         // Update cache
         transferCache = {
