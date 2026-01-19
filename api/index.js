@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(cors());
@@ -13,6 +15,8 @@ app.use(express.json());
 const CFBD_API_KEY = process.env.CFBD_API_KEY;
 const CFBD_BASE_URL = 'https://api.collegefootballdata.com';
 const CACHE_DURATION_MS = 5 * 60 * 1000; // 5 minutes cache
+const FREEZE_TRANSFERS = process.env.FREEZE_TRANSFERS === 'true';
+const TRANSFER_SNAPSHOT_PATH = path.join(__dirname, 'transfers_snapshot_2026-01-16.json');
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // IN-MEMORY CACHE (year-aware)
@@ -24,6 +28,22 @@ let transferCache = {
     lastUpdated: null,
     byTeam: {}
 };
+
+let transferSnapshot = null;
+
+function loadTransferSnapshot() {
+    if (transferSnapshot) {
+        return transferSnapshot;
+    }
+    try {
+        const raw = fs.readFileSync(TRANSFER_SNAPSHOT_PATH, 'utf8');
+        transferSnapshot = JSON.parse(raw);
+        return transferSnapshot;
+    } catch (error) {
+        console.error('❌ Failed to load transfer snapshot:', error.message);
+        return null;
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TEAM DATA (matches iOS app exactly)
@@ -666,7 +686,8 @@ app.get('/api/health', (req, res) => {
     const cacheAge = transferCache.lastUpdated 
         ? Math.round((Date.now() - transferCache.lastUpdated) / 1000)
         : null;
-    
+    const snapshot = FREEZE_TRANSFERS ? loadTransferSnapshot() : null;
+
     res.json({
         status: 'ok',
         cache: {
@@ -674,6 +695,8 @@ app.get('/api/health', (req, res) => {
             ageSeconds: cacheAge,
             teamCount: transferCache.data ? Object.keys(transferCache.data).length : 0
         },
+        freezeTransfers: FREEZE_TRANSFERS,
+        snapshotLastUpdated: snapshot?.lastUpdated || null,
         cfbdConfigured: !!CFBD_API_KEY
     });
 });
@@ -790,6 +813,13 @@ app.get('/api/career/:playerName', async (req, res) => {
 // Get all transfers (main endpoint for iOS app)
 app.get('/api/transfers', async (req, res) => {
     try {
+        if (FREEZE_TRANSFERS) {
+            const snapshot = loadTransferSnapshot();
+            if (snapshot?.teams) {
+                return res.json(snapshot);
+            }
+        }
+
         const year = req.query.year || 2026;
         const teamData = await fetchTransferPortalData(year);
         
@@ -835,6 +865,19 @@ app.get('/api/transfers/:team', async (req, res) => {
             });
         }
         
+        if (FREEZE_TRANSFERS) {
+            const snapshot = loadTransferSnapshot();
+            if (snapshot?.teams) {
+                const teamData = snapshot.teams[teamName] || { playersOut: [], playersIn: [] };
+                return res.json({
+                    team: teamName,
+                    info: TEAM_INFO[teamName],
+                    ...teamData,
+                    netChange: teamData.playersIn.length - teamData.playersOut.length
+                });
+            }
+        }
+
         const allData = await fetchTransferPortalData(year);
         const teamData = allData[teamName] || { playersOut: [], playersIn: [] };
         
