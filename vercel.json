@@ -6,6 +6,13 @@
       "use": "@vercel/node"
     }
   ],
+  "functions": {
+    "api/index.js": {
+      "includeFiles": [
+        "api/transfers_snapshot_2026-01-16.json"
+      ]
+    }
+  },
   "routes": [
     {
       "src": "/(.*)",
