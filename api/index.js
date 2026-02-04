@@ -1,8 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
 app.use(cors());
@@ -15,9 +13,6 @@ app.use(express.json());
 const CFBD_API_KEY = process.env.CFBD_API_KEY;
 const CFBD_BASE_URL = 'https://api.collegefootballdata.com';
 const CACHE_DURATION_MS = 5 * 60 * 1000; // 5 minutes cache
-const FREEZE_TRANSFERS = process.env.FREEZE_TRANSFERS === 'true';
-const TRANSFER_SNAPSHOT_URL = process.env.TRANSFER_SNAPSHOT_URL ||
-    'https://raw.githubusercontent.com/crsnpalmer-art/transfer-portal-api/main/api/transfers_snapshot_2026-01-16.json';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // IN-MEMORY CACHE (year-aware)
@@ -30,34 +25,6 @@ let transferCache = {
     byTeam: {}
 };
 
-let transferSnapshot = null;
-
-async function loadTransferSnapshot() {
-    if (transferSnapshot) {
-        return transferSnapshot;
-    }
-
-    // First try local bundled snapshot (if present)
-    try {
-        transferSnapshot = require('./transfers_snapshot_2026-01-16.json');
-        return transferSnapshot;
-    } catch (_) {
-        // ignore and fall back to remote
-    }
-
-    // Fallback to remote snapshot URL (GitHub raw)
-    try {
-        const res = await fetch(TRANSFER_SNAPSHOT_URL);
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
-        }
-        transferSnapshot = await res.json();
-        return transferSnapshot;
-    } catch (error) {
-        console.error('❌ Failed to load transfer snapshot:', error.message);
-        return null;
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TEAM DATA (matches iOS app exactly)
@@ -696,11 +663,10 @@ app.get('/', (req, res) => {
 });
 
 // Health check with cache info
-app.get('/api/health', async (req, res) => {
+app.get('/api/health', (req, res) => {
     const cacheAge = transferCache.lastUpdated 
         ? Math.round((Date.now() - transferCache.lastUpdated) / 1000)
         : null;
-    const snapshot = FREEZE_TRANSFERS ? await loadTransferSnapshot() : null;
 
     res.json({
         status: 'ok',
@@ -709,8 +675,6 @@ app.get('/api/health', async (req, res) => {
             ageSeconds: cacheAge,
             teamCount: transferCache.data ? Object.keys(transferCache.data).length : 0
         },
-        freezeTransfers: FREEZE_TRANSFERS,
-        snapshotLastUpdated: snapshot?.lastUpdated || null,
         cfbdConfigured: !!CFBD_API_KEY
     });
 });
@@ -827,13 +791,6 @@ app.get('/api/career/:playerName', async (req, res) => {
 // Get all transfers (main endpoint for iOS app)
 app.get('/api/transfers', async (req, res) => {
     try {
-        if (FREEZE_TRANSFERS) {
-            const snapshot = await loadTransferSnapshot();
-            if (snapshot?.teams) {
-                return res.json(snapshot);
-            }
-        }
-
         const year = req.query.year || 2026;
         const teamData = await fetchTransferPortalData(year);
         
@@ -879,19 +836,6 @@ app.get('/api/transfers/:team', async (req, res) => {
             });
         }
         
-        if (FREEZE_TRANSFERS) {
-            const snapshot = await loadTransferSnapshot();
-            if (snapshot?.teams) {
-                const teamData = snapshot.teams[teamName] || { playersOut: [], playersIn: [] };
-                return res.json({
-                    team: teamName,
-                    info: TEAM_INFO[teamName],
-                    ...teamData,
-                    netChange: teamData.playersIn.length - teamData.playersOut.length
-                });
-            }
-        }
-
         const allData = await fetchTransferPortalData(year);
         const teamData = allData[teamName] || { playersOut: [], playersIn: [] };
         
