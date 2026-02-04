@@ -7,6 +7,102 @@ app.use(cors());
 app.use(express.json());
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// LEGAL PAGES (Terms + Privacy)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const APP_NAME = "Tracker Portal - CFB Tracker";
+const CONTACT_EMAIL = "crsnpalmer@gmail.com";
+const LEGAL_LAST_UPDATED = "February 4, 2026";
+
+function renderLegalPage({ title, body }) {
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${title} - ${APP_NAME}</title>
+  <style>
+    :root { color-scheme: light; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; color: #111827; background: #f8fafc; }
+    main { max-width: 860px; margin: 0 auto; padding: 48px 20px 80px; }
+    h1 { font-size: 2rem; margin-bottom: 0.25rem; }
+    h2 { font-size: 1.25rem; margin-top: 2rem; }
+    p, li { line-height: 1.6; color: #1f2937; }
+    .meta { color: #6b7280; font-size: 0.95rem; margin-bottom: 2rem; }
+    a { color: #2563eb; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .card { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 24px; box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05); }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <h1>${title}</h1>
+      <div class="meta">Last updated: ${LEGAL_LAST_UPDATED}</div>
+      ${body}
+      <p>If you have questions, contact us at <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a>.</p>
+    </div>
+  </main>
+</body>
+</html>`;
+}
+
+const TERMS_HTML = renderLegalPage({
+    title: "Terms of Service",
+    body: `
+      <p>These Terms of Service ("Terms") govern your use of ${APP_NAME} (the "App"). By using the App, you agree to these Terms.</p>
+      <h2>Eligibility</h2>
+      <p>You must be at least 13 years old to use the App.</p>
+      <h2>Accounts</h2>
+      <p>If you create an account, you are responsible for maintaining its security and for all activity that occurs under your account.</p>
+      <h2>Use of the App</h2>
+      <p>You agree not to misuse the App, attempt to access it in unauthorized ways, or disrupt its operation.</p>
+      <h2>Third-Party Services</h2>
+      <p>The App integrates third-party services (such as Firebase and authentication providers). Your use of those services may be governed by their own terms.</p>
+      <h2>Data Sources</h2>
+      <p>Transfer data and statistics are provided by third-party sources. We do not guarantee completeness or accuracy.</p>
+      <h2>Termination</h2>
+      <p>We may suspend or terminate access to the App if you violate these Terms or if the App is discontinued.</p>
+      <h2>Disclaimers</h2>
+      <p>The App is provided "as is" without warranties of any kind. Use at your own risk.</p>
+      <h2>Limitation of Liability</h2>
+      <p>To the maximum extent permitted by law, we are not liable for indirect, incidental, or consequential damages arising from your use of the App.</p>
+      <h2>Changes to These Terms</h2>
+      <p>We may update these Terms from time to time. Continued use of the App after changes means you accept the updated Terms.</p>
+    `
+});
+
+const PRIVACY_HTML = renderLegalPage({
+    title: "Privacy Policy",
+    body: `
+      <p>This Privacy Policy explains how ${APP_NAME} collects, uses, and shares information when you use the App.</p>
+      <h2>Information We Collect</h2>
+      <ul>
+        <li><strong>Account information:</strong> name, email, and authentication identifiers if you create an account.</li>
+        <li><strong>Profile data:</strong> preferences and settings you configure in the App.</li>
+        <li><strong>Device and service data:</strong> basic device information, IP address, and security-related logs collected by our service providers (such as Firebase).</li>
+      </ul>
+      <h2>How We Use Information</h2>
+      <ul>
+        <li>Provide and maintain the App and its features.</li>
+        <li>Sync your profile and preferences.</li>
+        <li>Protect the App and prevent abuse.</li>
+        <li>Respond to support requests.</li>
+      </ul>
+      <h2>Sharing</h2>
+      <p>We do not sell your personal information. We share data only with service providers necessary to operate the App (e.g., Firebase) or if required by law.</p>
+      <h2>Data Retention</h2>
+      <p>We retain your account data while your account is active. You can delete your account at any time in the App.</p>
+      <h2>Account Deletion</h2>
+      <p>You can permanently delete your account in the App via Settings &gt; Account Management &gt; Delete Account. If you need help, email us at ${CONTACT_EMAIL}.</p>
+      <h2>Children's Privacy</h2>
+      <p>The App is not intended for children under 13.</p>
+      <h2>Changes to This Policy</h2>
+      <p>We may update this policy from time to time. Continued use of the App after changes means you accept the updated policy.</p>
+    `
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -646,6 +742,17 @@ async function fetchCareerHistoryForPlayer(playerName, knownTeam) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // API ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════════════
+
+// Legal pages
+app.get('/legal/terms', (req, res) => {
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.send(TERMS_HTML);
+});
+
+app.get('/legal/privacy', (req, res) => {
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.send(PRIVACY_HTML);
+});
 
 // Health check
 app.get('/', (req, res) => {
