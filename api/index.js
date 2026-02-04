@@ -16,7 +16,8 @@ const CFBD_API_KEY = process.env.CFBD_API_KEY;
 const CFBD_BASE_URL = 'https://api.collegefootballdata.com';
 const CACHE_DURATION_MS = 5 * 60 * 1000; // 5 minutes cache
 const FREEZE_TRANSFERS = process.env.FREEZE_TRANSFERS === 'true';
-const TRANSFER_SNAPSHOT_PATH = path.join(__dirname, 'transfers_snapshot_2026-01-16.json');
+const TRANSFER_SNAPSHOT_URL = process.env.TRANSFER_SNAPSHOT_URL ||
+    'https://raw.githubusercontent.com/crsnpalmer-art/transfer-portal-api/main/api/transfers_snapshot_2026-01-16.json';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // IN-MEMORY CACHE (year-aware)
@@ -31,13 +32,26 @@ let transferCache = {
 
 let transferSnapshot = null;
 
-function loadTransferSnapshot() {
+async function loadTransferSnapshot() {
     if (transferSnapshot) {
         return transferSnapshot;
     }
+
+    // First try local bundled snapshot (if present)
     try {
-        const raw = fs.readFileSync(TRANSFER_SNAPSHOT_PATH, 'utf8');
-        transferSnapshot = JSON.parse(raw);
+        transferSnapshot = require('./transfers_snapshot_2026-01-16.json');
+        return transferSnapshot;
+    } catch (_) {
+        // ignore and fall back to remote
+    }
+
+    // Fallback to remote snapshot URL (GitHub raw)
+    try {
+        const res = await fetch(TRANSFER_SNAPSHOT_URL);
+        if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+        }
+        transferSnapshot = await res.json();
         return transferSnapshot;
     } catch (error) {
         console.error('❌ Failed to load transfer snapshot:', error.message);
@@ -682,11 +696,11 @@ app.get('/', (req, res) => {
 });
 
 // Health check with cache info
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
     const cacheAge = transferCache.lastUpdated 
         ? Math.round((Date.now() - transferCache.lastUpdated) / 1000)
         : null;
-    const snapshot = FREEZE_TRANSFERS ? loadTransferSnapshot() : null;
+    const snapshot = FREEZE_TRANSFERS ? await loadTransferSnapshot() : null;
 
     res.json({
         status: 'ok',
@@ -814,7 +828,7 @@ app.get('/api/career/:playerName', async (req, res) => {
 app.get('/api/transfers', async (req, res) => {
     try {
         if (FREEZE_TRANSFERS) {
-            const snapshot = loadTransferSnapshot();
+            const snapshot = await loadTransferSnapshot();
             if (snapshot?.teams) {
                 return res.json(snapshot);
             }
@@ -866,7 +880,7 @@ app.get('/api/transfers/:team', async (req, res) => {
         }
         
         if (FREEZE_TRANSFERS) {
-            const snapshot = loadTransferSnapshot();
+            const snapshot = await loadTransferSnapshot();
             if (snapshot?.teams) {
                 const teamData = snapshot.teams[teamName] || { playersOut: [], playersIn: [] };
                 return res.json({
