@@ -26,3 +26,5 @@ Note: Use a fresh commit to trigger Vercel redeploys when configuration changes.
 ---
 
 *This API was vibe coded.*
+
+<!-- deploy trigger -->
