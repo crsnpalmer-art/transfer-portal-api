@@ -8,9 +8,7 @@
   ],
   "functions": {
     "api/index.js": {
-      "includeFiles": [
-        "api/transfers_snapshot_2026-01-16.json"
-      ]
+      "includeFiles": "api/transfers_snapshot_2026-01-16.json"
     }
   },
   "routes": [
